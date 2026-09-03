@@ -1,0 +1,260 @@
+---
+title: "Study 1A: The vignette task - statistical analyses and figures"
+output: html_document
+date: "2024-05-14"
+---
+
+This script reproduces all Study 1A results reported in the manuscript and the
+Supplementary Information (SOM).
+
+Output map:
+- Table S2 (Study 1A column)  -> Model 1 (lm1) and Model 2 (lm2) summaries
+- Main-text simple-slope stats -> "Simple slopes" blocks under Model 1 / Model 2
+- Figure 1A (overall effect)   -> Figure1A.png
+- Figure S2B (by crime type)   -> FigureS2B.png
+- Figure S2A (10 scenarios)    -> FigureS2A.png
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r library}
+library(pacman)
+pacman::p_load(tidyverse, ggplot2, readr, dplyr, scales,
+               lme4, lmerTest, optimx, emmeans)
+```
+
+```{r directories-and-theme}
+# Root directory of the Study_1A submission folder.
+# Update this path if you place the folder elsewhere.
+rootdir      <- "D:/DJ/JEPG/Study_1A"
+data_savedir <- file.path(rootdir, "data", "merged_prep_data")
+plot_savedir <- file.path(rootdir, "output", "figures")
+
+if (!dir.exists(plot_savedir)) dir.create(plot_savedir, recursive = TRUE)
+
+# Shared ggplot theme (clean, publication style)
+myconfig <- theme(
+  axis.line.x = element_line(size = 1),
+  axis.line.y = element_line(size = 1),
+  axis.text = element_text(size = 14),
+  axis.title.x = element_text(size = 18, vjust = -1, face = "bold"),
+  axis.title.y = element_text(size = 18, vjust = 1, face = "bold"),
+  legend.text = element_text(size = 16),
+  legend.title = element_text(size = 16),
+  strip.background = element_blank(),
+  strip.text = element_text(size = 18, face = "bold"),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  panel.spacing = unit("0.5", "cm"),
+  plot.title = element_text(size = 18, hjust = 0.5, vjust = 3, face = "bold"),
+  plot.margin = unit(c(1, 1, 1, 1), "cm"))
+
+# Grey palette for the three severity levels (low / medium / high)
+severity_palette <- c("低" = "#B0B0B0", "中" = "#6F6F6F", "高" = "#2F2F2F")
+severity_labels  <- c("Low", "Medium", "High")
+```
+
+# 1. Data preparation
+
+Delay is log-transformed (ln(delay + 1)) and rescaled to [-1, 1]. Severity
+(low/medium/high) is coded -1/0/1. Crime Type (monetary loss vs. physical
+injury) is contrast-coded (monetary loss = -1, physical injury = +1).
+
+```{r load-data}
+# Rescale a numeric vector to the range [-1, 1]
+scaled_var <- function(x) {
+  2 * (x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE)) - 1
+}
+
+dat <- read_csv(file.path(data_savedir, "DJ_merge_text1_192.csv")) %>%
+  mutate(
+    type      = ifelse(situation %in% c("beat", "traffic"), "body", "money"),
+    log_delay = log(1 + delay),
+    z_delay   = scaled_var(log_delay)
+  )
+
+# Severity: ordered factor -> numeric (1,2,3) -> scaled to (-1,0,1)
+dat$harm        <- factor(dat$harm, levels = c("低", "中", "高"), ordered = TRUE)
+dat$harm_scaled <- scales::rescale(as.numeric(dat$harm), to = c(-1, 1))
+
+# Crime Type: contrast coding (body = +1, money = -1)
+dat$type <- as.factor(dat$type)
+contrasts(dat$type) <- contr.sum(2)
+```
+
+# 2. Model 1: Delay x Severity, controlling for Crime Scenario
+
+Corresponds to the left ("Study 1A") column of Table S2 and the first
+paragraph of the Study 1A Results (main effect of Delay and Delay x Severity
+interaction).
+
+```{r model1-fit}
+lm1 <- lmer(
+  rating ~ harm_scaled * z_delay + situation +
+    (1 + harm_scaled + z_delay | participant),
+  data = dat,
+  control = lmerControl(optimizer = "optimx",
+                        optCtrl = list(method = "nlminb", maxit = 1000)))
+
+isSingular(lm1)
+summary(lm1)
+confint(lm1, method = "Wald")   # 95% Wald CIs reported in the text / Table S2
+```
+
+```{r model1-simple-slopes}
+# Simple slopes of Delay at each Severity level (high / medium / low)
+# Main text: high b = -25.82, medium b = -22.66, low b = -19.50
+slopes_severity <- emtrends(lm1, ~ harm_scaled, var = "z_delay",
+                            at = list(harm_scaled = c(-1, 0, 1)))
+summary(slopes_severity, infer = c(TRUE, TRUE))
+```
+
+# 3. Model 2: Delay x Severity x Crime Type
+
+Corresponds to the right column of Table S2 and the second paragraph of the
+Study 1A Results (three-way interaction with Crime Type).
+
+```{r model2-fit}
+lm2 <- lmer(
+  rating ~ harm_scaled * z_delay * type +
+    (1 + harm_scaled + z_delay + type | participant),
+  data = dat,
+  control = lmerControl(optimizer = "optimx",
+                        optCtrl = list(method = "nlminb", maxit = 1000)))
+
+isSingular(lm2)
+summary(lm2)
+confint(lm2, method = "Wald")
+```
+
+```{r model2-follow-up}
+# Follow-up: Delay x Severity interaction within each Crime Type, fitted
+# separately for physical injury (body) and monetary loss (money).
+# Main text: physical injury b = -4.04, monetary loss b = -2.94
+model_body <- lmer(
+  rating ~ z_delay * harm_scaled + (1 + z_delay + harm_scaled | participant),
+  data = subset(dat, type == "body"))
+
+model_money <- lmer(
+  rating ~ z_delay * harm_scaled + (1 + z_delay + harm_scaled | participant),
+  data = subset(dat, type == "money"))
+
+# Interaction coefficient (Delay x Severity) for each crime type
+summary(model_body)$coefficients["z_delay:harm_scaled", ]
+summary(model_money)$coefficients["z_delay:harm_scaled", ]
+
+confint(model_body,  method = "Wald")
+confint(model_money, method = "Wald")
+```
+
+# 4. Figure 1A: Overall effect of Delay and Severity
+
+Group-averaged justice ratings (mean +/- SEM) across all scenarios.
+
+```{r figure-1A}
+# Subject-level means, then between-subject means and SEM per condition
+fig2a_data <- dat %>%
+  group_by(participant, delay, harm) %>%
+  summarise(mean_rating = mean(rating), .groups = "drop") %>%
+  group_by(delay, harm) %>%
+  summarise(
+    n_subj        = n(),
+    mean_response = mean(mean_rating),
+    se            = sd(mean_rating) / sqrt(n_subj),
+    .groups = "drop")
+
+ggplot(fig2a_data, aes(x = delay, y = mean_response, group = harm, color = harm)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey") +
+  geom_line(size = 0.8) +
+  geom_errorbar(aes(ymin = mean_response - se, ymax = mean_response + se),
+                width = 10, size = 0.5) +
+  geom_point(size = 3) +
+  scale_color_manual(values = severity_palette, labels = severity_labels) +
+  scale_x_continuous(breaks = c(0, 90, 180, 365)) +
+  scale_y_continuous(limits = c(-11, 50), breaks = seq(-10, 50, 20)) +
+  labs(title = "All Conditions", x = "Temporal Delay (day)",
+       y = "Justice Rating", color = "Severity") +
+  theme_minimal() + myconfig +
+  theme(legend.title = element_text(face = "bold"))
+
+ggsave(file.path(plot_savedir, "Figure1A.png"), width = 6, height = 4.5)
+```
+
+# 5. Figure S2B: Effect separated by Crime Type
+
+Same ratings split into physical injury vs. monetary loss scenarios.
+
+```{r figure-S2B}
+fig2b_data <- dat %>%
+  group_by(participant, delay, harm, type) %>%
+  summarise(mean_rating = mean(rating), .groups = "drop") %>%
+  group_by(delay, harm, type) %>%
+  summarise(
+    n_subj        = n(),
+    mean_response = mean(mean_rating),
+    se            = sd(mean_rating) / sqrt(n_subj),
+    .groups = "drop")
+
+ggplot(fig2b_data, aes(x = delay, y = mean_response, color = harm,
+                       group = interaction(type, harm))) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey") +
+  geom_line(size = 1) +
+  geom_errorbar(aes(ymin = mean_response - se, ymax = mean_response + se),
+                width = 10, size = 0.5) +
+  geom_point(size = 2.5) +
+  facet_wrap(~type, scales = "free",
+             labeller = labeller(type = c("body"  = "Personal Injury",
+                                          "money" = "Property Loss"))) +
+  scale_color_manual(values = severity_palette, labels = severity_labels) +
+  scale_x_continuous(breaks = c(0, 90, 180, 365)) +
+  scale_y_continuous(limits = c(-11, 50), breaks = seq(-10, 50, 20)) +
+  labs(x = "Temporal Delay (day)", y = "Justice Rating", color = "Severity") +
+  theme_minimal() + myconfig +
+  theme(legend.title = element_text(face = "bold"))
+
+ggsave(file.path(plot_savedir, "FigureS2B.png"), width = 10, height = 4)
+```
+
+# 6. Figure S2A: Effects across the 10 criminal scenarios
+
+```{r figure-S2A}
+scenario_labels <- c(
+  "antique"   = "Trafficking in\nCultural Relics",
+  "tax"       = "Customs Tax\nEvasion",
+  "public"    = "Vandalism",
+  "construct" = "Project Fund\nMisappropriation",
+  "gamble"    = "Public Funds\nGambling",
+  "steal"     = "Burglary",
+  "cheat"     = "Telecom Fraud",
+  "rob"       = "Robbery",
+  "beat"      = "Assault\nCausing Injury",
+  "traffic"   = "Traffic Accident")
+
+figS1_data <- dat %>%
+  group_by(delay, harm, situation) %>%
+  summarise(mean_rating = mean(rating),
+            se = sd(rating) / sqrt(n()), .groups = "drop")
+
+ggplot(figS1_data, aes(x = delay, y = mean_rating, color = harm,
+                       group = interaction(situation, harm))) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey") +
+  geom_line(position = position_dodge(0.5), size = 1.1) +
+  geom_point(size = 3, position = position_dodge(0.5)) +
+  geom_errorbar(aes(ymin = mean_rating - se, ymax = mean_rating + se),
+                width = 10, size = 0.5, position = position_dodge(0.5)) +
+  facet_wrap(~situation, scales = "free", nrow = 2, ncol = 5,
+             labeller = labeller(situation = scenario_labels)) +
+  scale_color_manual(values = severity_palette, labels = severity_labels) +
+  scale_x_continuous(breaks = c(0, 90, 180, 365)) +
+  scale_y_continuous(limits = c(-10, 50), breaks = seq(-10, 50, by = 20)) +
+  labs(x = "Temporal Delay (day)", y = "Justice Rating", color = "Severity") +
+  theme_minimal() + myconfig +
+  theme(panel.spacing = unit(4, "mm"),
+        legend.position = "none",
+        strip.placement = "outside",
+        axis.title.x = element_text(size = 21, vjust = -1, face = "bold"),
+        axis.title.y = element_text(size = 21, vjust = 1, face = "bold"))
+
+ggsave(file.path(plot_savedir, "FigureS2A.png"), width = 14, height = 7)
+```

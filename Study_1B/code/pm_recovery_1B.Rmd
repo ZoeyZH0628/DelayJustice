@@ -1,0 +1,142 @@
+---
+title: "Study 1B: Parameter recovery of the best-fitting model (Model 1-4)"
+output: html_document
+date: "2023-11-30"
+---
+
+Parameter recovery for the best-fitting model (Model 1-4). The model is re-fitted
+to the data simulated during the posterior predictive check (the `pred_mean`
+column of `..._Rating_pred_orig_mean.csv`, produced by stan_model_1B.Rmd), and the
+recovered individual-level parameters are correlated with the original estimates.
+
+Output: Figure S4D -> FigureS4D_parameter_recovery.png
+
+The recovery fit is cached: if `<model>_hbmrecovery.RData` exists it is reused.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r directories}
+# Root directory of the Study_1B submission folder.
+# Update this path if you place the folder elsewhere.
+rootdir         <- "D:/DJ/JEPG/Study_1B"
+data_savedir    <- paste0(rootdir, "/data/merged_prep_data/")
+code_savedir    <- paste0(rootdir, "/code/")
+stanfit_savedir <- paste0(rootdir, "/output/stanfits/")
+plot_savedir    <- paste0(rootdir, "/output/figures/")
+
+# Sources rstan/loo/tidyverse and the recovery-specific DJ_rstan_fit (which reads
+# the simulated ratings from the `pred_mean` column)
+source(paste0(code_savedir, "recovery_rstan_fit_1b.R"))
+
+nIter   <- 3000
+nwarmup <- 2000
+nChains <- 4
+
+models      <- c("DJ_1b_rescale_m1-4")
+modelno     <- length(models)
+
+myconfig <- theme(
+  axis.text = element_text(size = 15),
+  axis.title.x = element_text(size = 17, vjust = -1, face = "bold"),
+  axis.title.y = element_text(size = 17, vjust = 1, face = "bold"),
+  legend.text = element_text(size = 14),
+  legend.title = element_text(size = 14),
+  strip.background = element_blank(),
+  strip.text = element_text(size = 17, face = "bold"),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  panel.spacing = unit("0.5", "cm"),
+  plot.title = element_text(size = 20, vjust = 3, hjust = 0.5),
+  plot.margin = unit(c(1, 1, 1, 1), "cm"))
+```
+
+# 1. Re-fit the best model to simulated data (cached)
+
+```{r recovery-fit}
+df <- read_csv(paste0(stanfit_savedir, "DJ_1b_rescale_m1-4_Rating_pred_orig_mean.csv"))
+
+for (m in 1:modelno) {
+  model_tmp <- paste0(models[m], "_hbm")
+  # The recovery fit is saved as "<modelStr>recovery.RData" with modelStr ending
+  # in "_hbm" (see recovery_rstan_fit_1b.R), i.e. "<model>_hbmrecovery.RData".
+  fitname   <- paste0(model_tmp, "recovery.RData")
+
+  if (!file.exists(paste0(stanfit_savedir, fitname))) {
+    print(paste0(model_tmp, " is now being fitted ..."))
+    DJ_rstan_fit(modelStr = model_tmp, test = F, saveFit = T,
+                 nIter = nIter, nwarmup = nwarmup,
+                 data_dir = data_savedir, code_dir = code_savedir,
+                 savedir = stanfit_savedir)
+  } else {
+    print(paste0(model_tmp, " has been fitted ..."))
+  }
+}
+```
+
+# 2. Extract recovered parameters and compare with original estimates
+
+```{r extract-recovered}
+m_win    <- 1
+winmodel <- models[m_win]
+fitname  <- paste0(stanfit_savedir, winmodel, "_hbmrecovery.RData")
+
+pars_win     <- create_pois(paste0(winmodel, "_hbm"))
+N_group_pars <- sum(stringr::str_detect(pars_win, "mu_"))
+ind_pars     <- pars_win[1:(length(pars_win) - 4 - N_group_pars)]
+
+fit <- readRDS(fitname)
+
+get_pm_individual <- function(df_input, pars_input, df_input1, N_Chains) {
+  Sbj_label <- unique(df_input1$participant)
+  pars_value_all <- get_posterior_mean(df_input$fit, pars = pars_input)[, N_Chains + 1]
+  data.frame(pars_value = pars_value_all,
+             pars_name  = rep(pars_input, each = length(Sbj_label)),
+             SbjIdx     = rep(Sbj_label, times = length(pars_input)))
+}
+
+# Recovered estimates (from simulated ratings)
+pr_individual <- get_pm_individual(fit, ind_pars, df, nChains) %>%
+  rename(pr_pars_value = pars_value)
+
+# Original estimates (from observed ratings; produced by stan_model_1B.Rmd)
+pm_individual <- read_csv(paste0(stanfit_savedir, "winmodel_", winmodel, "_indpm.csv"))
+
+pr_recovery <- merge(pr_individual, pm_individual) %>%
+  filter(pars_name != "sig")
+pr_recovery$pars_name <- as.factor(pr_recovery$pars_name)
+```
+
+# 3. Figure S4D: true vs recovered parameters
+
+```{r figure-S4B}
+recovery_4plot <- pr_recovery %>%
+  mutate(pars_name = recode(pars_name,
+                            gamma_help   = "γ_compensation",
+                            k_help       = "κ_compensation",
+                            gamma_punish = "γ_punishment",
+                            k_punish     = "κ_punishment")) %>%
+  filter(!pars_name %in% c("w1", "w0"))
+
+# Per-parameter Pearson correlation (true vs recovered)
+df_r <- recovery_4plot %>%
+  group_by(pars_name) %>%
+  summarise(r = cor(pars_value, pr_pars_value, method = "pearson"), .groups = "drop") %>%
+  mutate(label = paste0("r = ", round(r, 2)), xpos = -1 + 0.05, ypos = 1 - 0.05)
+print(df_r)
+
+pr <- ggplot(recovery_4plot, aes(x = pars_value, y = pr_pars_value)) +
+  geom_point(size = 2.5, alpha = .5, color = "gray50") +
+  geom_abline(intercept = 0, slope = 1, size = 0.5, linetype = "dashed", color = "black") +
+  scale_x_continuous(breaks = seq(-1, 1, by = 0.5)) +
+  facet_wrap(~pars_name, scales = "fixed") +
+  labs(x = "\nActual", y = "Recovered\n") +
+  geom_text(data = df_r, aes(x = xpos, y = ypos, label = label), size = 5,
+            inherit.aes = FALSE, hjust = 0, vjust = 1) +
+  theme_bw() + myconfig +
+  theme(legend.position = "none", strip.text = element_text(size = 14, face = "bold"))
+
+ggsave(paste0(plot_savedir, "FigureS4D_parameter_recovery.png"), plot = pr,
+       width = 7, height = 5)
+```

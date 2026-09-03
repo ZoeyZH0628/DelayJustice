@@ -1,0 +1,295 @@
+---
+title: "Study 1B: The third-party economic task - behavioral LMM analyses"
+output: html_document
+date: "2023-09-19"
+---
+
+This script reproduces the behavioral (linear mixed-effects) results of Study 1B.
+
+Output map:
+- Table S3 (Study 1B column)  -> Model 1 (lm1) and Model 2 (lm2) summaries
+- Main-text simple-slope stats -> "Simple slopes" blocks under Model 1 / Model 2
+- Table S4 (additional ratings)-> lmq1 (unfairness A), lmq2 (empathy B), lmq3 (justice C)
+- Table S5 (combined control)  -> lm_control_q123_m1 (Model 1 + covariates),
+-                                  lm_control_q123_m2 (Model 2 + covariates)
+- Figure 1B (justice by delay) -> Figure1B.png
+- Figure S3 (additional ratings)-> FigureS3.png
+
+The computational-modeling results (Figures S4B, 1C, S4A, S4C-D) are produced by
+stan_model_1B.Rmd and pm_recovery_1B.Rmd.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r library}
+library(pacman)
+pacman::p_load(tidyverse, ggplot2, readr, dplyr, scales,
+               lme4, lmerTest, optimx, emmeans, patchwork)
+```
+
+# 1. Directories and theme
+
+```{r directories-and-theme}
+# Root directory of the Study_1B submission folder.
+# Update this path if you place the folder elsewhere.
+rootdir      <- "D:/DJ/JEPG/Study_1B"
+data_savedir <- file.path(rootdir, "data", "merged_prep_data")
+plot_savedir <- file.path(rootdir, "output", "figures")
+
+if (!dir.exists(plot_savedir)) dir.create(plot_savedir, recursive = TRUE)
+
+myconfig <- theme(
+  axis.line.x = element_line(size = 1),
+  axis.line.y = element_line(size = 1),
+  axis.text = element_text(size = 14),
+  axis.title.x = element_text(size = 18, vjust = -1, face = "bold"),
+  axis.title.y = element_text(size = 18, vjust = 1, face = "bold"),
+  legend.text = element_text(size = 14),
+  legend.title = element_text(size = 14, face = "bold"),
+  strip.background = element_blank(),
+  strip.text = element_text(size = 18, face = "bold"),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  panel.spacing = unit("0.5", "cm"),
+  plot.title = element_text(size = 20, hjust = 0.5, vjust = 3, face = "bold"),
+  plot.margin = unit(c(1, 1, 1, 1), "cm"))
+```
+
+# 2. Data preparation
+
+Ratings: q1 = perceived unfairness of Player A, q2 = empathy for Player B,
+q3 = perceived justice of Player C's decision, q4 = perceived justice of the
+whole event (primary DV). Delay is log-transformed and rescaled to [-1, 1];
+Inequality (severity) is rescaled to [-1, 1]; Mode (type:
+help = compensation, punish = punishment) is contrast-coded (help = +1,
+punish = -1).
+
+```{r read-data}
+scaled_var <- function(x) {
+  2 * (x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE)) - 1
+}
+
+dat <- read_csv(file.path(data_savedir, "DJ1_200_merge.csv")) %>%
+  rename(q1 = A_justice, q2 = B_empathy, q3 = C_justice, q4 = question4) %>%
+  filter(type != "control") %>%
+  filter(exp_name == "dj_1b")
+
+dat$participant[is.na(dat$participant)] <- "none"
+dat$type <- factor(dat$type)
+contrasts(dat$type) <- contr.sum(2)   # help = +1, punish = -1
+
+dat <- dat %>%
+  mutate(z.log.delay  = scaled_var(log(1 + as.numeric(delay))),
+         z.inequality = scaled_var(as.numeric(Inequality)))
+```
+
+# 3. Model 1: Delay x Severity, controlling for Mode
+
+Corresponds to the left ("Study 1B") column of Table S3 and the first Results
+paragraph (main effects of Delay and Severity, Delay x Severity interaction).
+
+```{r model1-fit}
+lm1 <- lmer(q4 ~ z.inequality * z.log.delay + type +
+              (1 + z.inequality + z.log.delay + type | participant),
+            data = dat, control = lmerControl(optCtrl = list(maxfun = 20000)))
+
+isSingular(lm1)
+summary(lm1)
+confint(lm1, method = "Wald")
+```
+
+```{r model1-simple-slopes}
+# Simple slopes of Delay at each of the five severity levels.
+# z.inequality maps Inequality 1..5 to -1, -0.5, 0, 0.5, 1.
+slopes_severity <- emtrends(lm1, ~ z.inequality, var = "z.log.delay",
+                            at = list(z.inequality = c(-1, -0.5, 0, 0.5, 1)))
+summary(slopes_severity, infer = c(TRUE, TRUE))
+```
+
+# 4. Model 2: Delay x Severity x Mode
+
+Corresponds to the right column of Table S3 and the second Results paragraph
+(Delay x Mode interaction).
+
+```{r model2-fit}
+lm2 <- lmer(q4 ~ z.inequality * z.log.delay * type +
+              (1 + z.inequality + z.log.delay + type | participant),
+            data = dat, control = lmerControl(optCtrl = list(maxfun = 20000)))
+
+isSingular(lm2)
+summary(lm2)
+confint(lm2, method = "Wald")
+```
+
+```{r model2-simple-slopes}
+# Simple slopes of Delay under compensation (help) vs punishment (punish).
+# Main text: compensation b = -10.82, punishment b = -9.28
+slopes_way <- emtrends(lm2, ~ type, var = "z.log.delay")
+summary(slopes_way, infer = c(TRUE, TRUE))
+```
+
+# 5. Additional ratings (Table S4)
+
+Same fixed-effect structure applied to the three control ratings, confirming
+the Delay x Severity effect is specific to the perceived justice of the whole
+event.
+
+```{r additional-ratings}
+lmq1 <- lmer(q1 ~ z.inequality * z.log.delay + type +
+               (1 + z.inequality + z.log.delay + type | participant),
+             data = dat, control = lmerControl(optCtrl = list(maxfun = 20000)))
+summary(lmq1)   # Perceived unfairness of Player A
+
+lmq2 <- lmer(q2 ~ z.inequality * z.log.delay + type +
+               (1 + z.inequality + z.log.delay + type | participant),
+             data = dat, control = lmerControl(optCtrl = list(maxfun = 20000)))
+summary(lmq2)   # Empathy for Player B
+
+lmq3 <- lmer(q3 ~ z.inequality * z.log.delay + type +
+               (1 + z.inequality + z.log.delay + type | participant),
+             data = dat, control = lmerControl(optCtrl = list(maxfun = 20000)))
+summary(lmq3)   # Perceived justice of Player C's decision
+```
+
+# 6. Combined control-regressor model
+
+This sensitivity analysis tests whether the Delay x Severity effect on perceived
+justice of the whole event remains after simultaneously controlling for the three
+additional ratings: perceived unfairness of Player A, empathy for Player B, and
+perceived justice of Player C's decision.
+
+```{r combined-control-regressor-model-1}
+# Model 1 structure (Delay x Severity, controlling for Mode) + q1 + q2 + q3
+lm_control_q123_m1 <- lmer(q4 ~ z.inequality * z.log.delay + type + q1 + q2 + q3 +
+                              (1 + z.inequality + z.log.delay + type | participant),
+                            data = dat, control = lmerControl(optCtrl = list(maxfun = 20000)))
+
+isSingular(lm_control_q123_m1)
+summary(lm_control_q123_m1)
+confint(lm_control_q123_m1, method = "Wald")
+```
+
+```{r combined-control-regressor-model-2}
+# Model 2 structure (Delay x Severity x Mode) + q1 + q2 + q3
+lm_control_q123_m2 <- lmer(q4 ~ z.inequality * z.log.delay * type + q1 + q2 + q3 +
+                              (1 + z.inequality + z.log.delay + type | participant),
+                            data = dat, control = lmerControl(optCtrl = list(maxfun = 20000)))
+
+isSingular(lm_control_q123_m2)
+summary(lm_control_q123_m2)
+confint(lm_control_q123_m2, method = "Wald")
+```
+
+# 7. Figures by Delay and Severity (Figure 1B + Figure S3)
+
+Justice ratings (Figure 1B) and the three additional ratings (Figure S3) are
+shown as group-averaged means (+/- SEM) against delay. The compensation and
+punishment blocks use blue and red base colors respectively (matching the
+computational-parameter figures); within each block, severity runs
+from light (low) to dark (high).
+
+```{r figures-by-delay-helper}
+type_labels <- c("help" = "Compensation", "punish" = "Punishment")
+
+# Severity encoded as alpha transparency (0.25 → 1.0 for levels 1 → 5),
+# keeping hue constant so blue = compensation and red = punishment throughout.
+col_comp    <- "#5B8DB8"
+col_punish  <- "#C06060"
+sev_levels  <- 1:5
+alpha_seq   <- seq(0.25, 1.0, length.out = 5)
+grad_comp   <- setNames(alpha(col_comp,   alpha_seq), sev_levels)
+grad_punish <- setNames(alpha(col_punish, alpha_seq), sev_levels)
+
+plot_by_delay <- function(qvar, ylab, outfile, ylim = NULL) {
+  d <- dat %>%
+    group_by(participant, delay, Inequality, type) %>%
+    summarise(mean_rating = mean(.data[[qvar]]), .groups = "drop") %>%
+    group_by(delay, Inequality, type) %>%
+    summarise(mean_response = mean(mean_rating),
+              se = sd(mean_rating) / sqrt(n()), .groups = "drop")
+
+  panel <- function(sub, grad, ttl) {
+    p <- ggplot(sub, aes(x = delay, y = mean_response,
+                         color = factor(Inequality), group = Inequality)) +
+      geom_line(position = position_dodge(0.65)) +
+      geom_errorbar(aes(ymin = mean_response - se, ymax = mean_response + se),
+                    width = 10, size = 0.5, position = position_dodge(0.65)) +
+      geom_point(position = position_dodge(0.65), size = 2.5) +
+      scale_color_manual(values = grad, name = "Severity") +
+      scale_x_continuous(breaks = c(0, 30, 90, 365)) +
+      labs(title = ttl, x = "Temporal Delay (day)", y = ylab) +
+      theme_minimal() + myconfig +
+      theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+            legend.key.width = unit(0.4, "cm"), legend.key.height = unit(0.7, "cm"))
+    if (!is.null(ylim)) p <- p + scale_y_continuous(limits = ylim,
+                                                    breaks = seq(ylim[1], ylim[2], 5))
+    p
+  }
+
+  p_comp   <- panel(dplyr::filter(d, type == "help"),   grad_comp,   "Compensation")
+  p_punish <- panel(dplyr::filter(d, type == "punish"), grad_punish, "Punishment")
+  ggsave(file.path(plot_savedir, outfile), p_comp + p_punish, width = 9, height = 4)
+}
+
+# One cell of the Figure S3 grid: rating `qvar` within one block (type).
+rating_cell <- function(qvar, ttype, grad, title = NULL, ylab = NULL,
+                        xlab = NULL, ylim = NULL) {
+  d <- dat %>%
+    group_by(participant, delay, Inequality, type) %>%
+    summarise(mr = mean(.data[[qvar]]), .groups = "drop") %>%
+    dplyr::filter(type == ttype) %>%
+    group_by(delay, Inequality) %>%
+    summarise(m = mean(mr), se = sd(mr) / sqrt(n()), .groups = "drop")
+
+  p <- ggplot(d, aes(x = delay, y = m, color = factor(Inequality), group = Inequality)) +
+    geom_line(position = position_dodge(0.65)) +
+    geom_errorbar(aes(ymin = m - se, ymax = m + se), width = 10, size = 0.5,
+                  position = position_dodge(0.65)) +
+    geom_point(position = position_dodge(0.65), size = 2.2) +
+    scale_color_manual(values = grad, name = "Severity") +
+    scale_x_continuous(breaks = c(0, 30, 90, 365)) +
+    labs(title = title, x = xlab, y = ylab) +
+    theme_minimal() + myconfig +
+    theme(plot.title = element_text(size = 15, face = "bold", hjust = 0.5),
+          legend.key.width = unit(0.35, "cm"), legend.key.height = unit(0.6, "cm"))
+  if (!is.null(ylim)) p <- p + coord_cartesian(ylim = ylim)
+  p
+}
+
+# Assemble the 2 (block) x 3 (rating) grid: columns = ratings, rows = blocks.
+# Row 1 = compensation (blue), row 2 = punishment (red); severity light -> dark.
+plot_ratings_grid <- function(ratings, col_titles, outfile) {
+  ylim_for <- function(qvar) {
+    d <- dat %>% group_by(participant, delay, Inequality, type) %>%
+      summarise(mr = mean(.data[[qvar]]), .groups = "drop") %>%
+      group_by(delay, Inequality, type) %>%
+      summarise(m = mean(mr), se = sd(mr) / sqrt(n()), .groups = "drop")
+    c(min(d$m - d$se), max(d$m + d$se))
+  }
+  yl <- lapply(ratings, ylim_for)
+
+  r1 <- rating_cell(ratings[1], "help", grad_comp, col_titles[1], "Compensation", NULL, yl[[1]]) |
+        rating_cell(ratings[2], "help", grad_comp, col_titles[2], NULL, NULL, yl[[2]]) |
+        rating_cell(ratings[3], "help", grad_comp, col_titles[3], NULL, NULL, yl[[3]])
+  r2 <- rating_cell(ratings[1], "punish", grad_punish, NULL, "Punishment", "Temporal Delay (day)", yl[[1]]) |
+        rating_cell(ratings[2], "punish", grad_punish, NULL, NULL, "Temporal Delay (day)", yl[[2]]) |
+        rating_cell(ratings[3], "punish", grad_punish, NULL, NULL, "Temporal Delay (day)", yl[[3]])
+  ggsave(file.path(plot_savedir, outfile), (r1 / r2) + plot_layout(guides = "collect"),
+         width = 13, height = 7)
+}
+```
+
+```{r figures-by-delay}
+# Figure 1B: perceived justice of the whole event (q4)
+plot_by_delay("q4", "Justice Rating", "Figure1B.png", ylim = c(0, 40))
+
+# Figure S3: additional ratings, arranged as a 2 (block) x 3 (rating) grid
+# (columns = ratings A/B/C; rows = compensation / punishment).
+plot_ratings_grid(
+  ratings    = c("q1", "q2", "q3"),
+  col_titles = c("(A) Unfairness (Player A)",
+                 "(B) Empathy (Player B)",
+                 "(C) Justice (Player C)"),
+  outfile    = "FigureS3.png")
+```

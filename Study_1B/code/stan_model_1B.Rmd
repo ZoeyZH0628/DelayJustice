@@ -1,0 +1,396 @@
+---
+title: "Study 1B: Computational modeling - fitting, comparison, parameters, PPC"
+output: html_document
+date: "2023-10-25"
+---
+
+This script fits and analyzes the hierarchical Bayesian models for Study 1B.
+
+Pipeline (model fits are cached: a model whose `<name>_hbm_3000.RData` already
+exists in output/stanfits/ is NOT re-fitted):
+  1. Build DJ_1b_data4stan.csv and fit the 8 candidate models.
+  2. Model comparison (LOOIC).                          -> Figure S4A
+  3. Best-fitting model (Model 1-4) parameter estimates. -> Figure 1C + paired t-tests
+  4. Posterior predictive checks.                        -> Figure S4C, Figure S4B
+
+Parameter recovery (Figure S4D) is produced by pm_recovery_1B.Rmd, which depends
+on the PPC output (`..._Rating_pred_orig_mean.csv`) generated here.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r directories-and-theme}
+# Root directory of the Study_1B submission folder.
+# Update this path if you place the folder elsewhere.
+rootdir         <- "D:/DJ/JEPG/Study_1B"
+data_savedir    <- paste0(rootdir, "/data/merged_prep_data/")
+code_savedir    <- paste0(rootdir, "/code/")
+stanfit_savedir <- paste0(rootdir, "/output/stanfits/")
+plot_savedir    <- paste0(rootdir, "/output/figures/")
+if (!dir.exists(plot_savedir)) dir.create(plot_savedir, recursive = TRUE)
+
+# Sources rstan/loo/tidyverse and defines DJ_rstan_fit / prep_data4stan / create_pois
+source(paste0(code_savedir, "DJ_rstan_fit_1b.R"))
+library(ggbeeswarm)
+
+myconfig <- theme(
+  axis.line.x = element_line(size = 1),
+  axis.line.y = element_line(size = 1),
+  axis.text = element_text(size = 14),
+  axis.title.x = element_text(size = 14, vjust = -1, face = "bold"),
+  axis.title.y = element_text(size = 14, vjust = 1, face = "bold"),
+  legend.text = element_text(size = 14),
+  legend.title = element_text(size = 14),
+  strip.background = element_blank(),
+  strip.text = element_text(size = 14, face = "bold"),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  panel.spacing = unit("0.5", "cm"),
+  plot.title = element_text(size = 20, hjust = 0.5, vjust = 3, face = "bold"),
+  plot.margin = unit(c(1, 1, 1, 1), "cm"))
+
+nIter   <- 3000
+nwarmup <- 2000
+nChains <- 4
+
+# The 8 candidate models reported in Table S5
+models <- c("DJ_1b_rescale_m1-1", "DJ_1b_rescale_m1-2",
+            "DJ_1b_rescale_m1-3", "DJ_1b_rescale_m1-4",
+            "DJ_1b_rescale_m2-1", "DJ_1b_rescale_m2-2",
+            "DJ_1b_rescale_m2-3", "DJ_1b_rescale_m2-4")
+modelno     <- length(models)
+stanfitlist <- dir(stanfit_savedir)
+```
+
+# 1. Prepare data for Stan
+
+```{r prep4stan}
+library(DescTools)
+
+if (!file.exists(paste0(data_savedir, "DJ_1b_data4stan.csv"))) {
+  df_valid <- read_csv(paste0(data_savedir, "DJ1_200_merge.csv")) %>%
+    filter(type != "control") %>%
+    filter(exp_name == "dj_1b") %>%
+    filter(participant != "NA") %>%
+    rename(q1 = A_justice, q2 = B_empathy, q3 = C_justice, q4 = question4) %>%
+    mutate(Delay_num   = delay,
+           Delay_month = case_when(delay == 0 ~ 0, delay == 1 ~ 0.03,
+                                   delay == 10 ~ 0.33, delay == 30 ~ 1,
+                                   delay == 90 ~ 3, delay == 365 ~ 12),
+           Delay_year  = case_when(delay == 0 ~ 0, delay == 1 ~ 0.003,
+                                   delay == 10 ~ 0.027, delay == 30 ~ 0.08,
+                                   delay == 90 ~ 0.25, delay == 365 ~ 1),
+           type_idx = ifelse(type == "help", 0, 1),
+           z.q4     = as.numeric(scale(q4)),
+           q4_modi  = q4 / 100 + 0.5,
+           eff_keep = numA + numB, eff_alter = changeA + changeB,
+           s.eff_keep = eff_keep / 200, s.eff_alter = eff_alter / 200) %>%
+    group_by(participant) %>% mutate(TrialNo_stan = 1:n()) %>% ungroup() %>%
+    rowwise() %>% mutate(gini = Gini(c(numA, numB))) %>% as.data.frame()
+
+  write.table(df_valid, paste0(data_savedir, "DJ_1b_data4stan.csv"),
+              row.names = F, quote = F, sep = ",")
+}
+
+df <- read_csv(paste0(data_savedir, "DJ_1b_data4stan.csv"))
+```
+
+# 2. Fit the candidate models (cached)
+
+```{r fit-models}
+for (m in 1:modelno) {
+  model_tmp <- paste0(models[m], "_hbm")
+  fitname   <- paste0(models[m], "_hbm_", toString(nIter), ".RData")
+
+  if (sum(stringr::str_detect(stanfitlist, fitname)) == 0) {
+    print(paste0(model_tmp, " is now being fitted ..."))
+    DJ_rstan_fit(modelStr = model_tmp, test = F, saveFit = T,
+                 nIter = nIter, nwarmup = nwarmup,
+                 data_dir = data_savedir, code_dir = code_savedir,
+                 savedir = stanfit_savedir)
+  } else {
+    print(paste0(model_tmp, " has been fitted ..."))
+  }
+}
+```
+
+# 3. Model comparison (Figure S4A)
+
+```{r rhat-fn}
+rhat <- function(fit = NULL, less = NULL, paraidx = NULL) {
+  if (class(fit$fit) != "stanfit") stop("'fit' is not of class stanfit!")
+  summaryData <- rstan::summary(fit$fit)
+  rhatData <- data.frame(Rhat = summaryData[["summary"]][, "Rhat"])
+  if (!is.null(less)) {
+    rhat_IsValid <- as.numeric(all(rhatData$Rhat[1:paraidx] <= less))
+    list(rhat_IsValid = rhat_IsValid, rhat_max = max(rhatData$Rhat[1:paraidx]))
+  } else {
+    rhatData
+  }
+}
+```
+
+```{r model-comparison-wrapper}
+model_comparison_wrapper <- function(model_label, rstan_dir, N_iter, df_input,
+                                     savedir = stanfit_savedir, IsSave = 1) {
+  modelno <- length(model_label)
+  rhat_IsValid <- rhat_max <- myloo <- mywaic <- array(0, c(modelno))
+
+  for (m in 1:modelno) {
+    sbjno   <- length(unique(df_input))
+    fitname <- paste0(rstan_dir, model_label[m], "_hbm_", N_iter, ".RData")
+    fit <- readRDS(fitname)
+    fit$fit@.MISC <- new.env(parent = globalenv())
+    pois_tmp     <- create_pois(paste0(model_label[m], "_hbm"))
+    N_group_pars <- sum(stringr::str_detect(pois_tmp, "mu_"))
+    paraidx      <- (N_group_pars / 2) * sbjno + N_group_pars
+    rhat_output  <- rhat(fit = fit, less = 1.1, paraidx = paraidx)
+    rhat_IsValid[[m]] <- rhat_output[[1]]
+    rhat_max[[m]]     <- rhat_output[[2]]
+    mylog_lik   <- loo::extract_log_lik(fit$fit, parameter_name = "log_lik")
+    myloo[[m]]  <- loo::loo(mylog_lik)$looic
+    mywaic[[m]] <- loo::waic(mylog_lik)$waic
+  }
+
+  df_mc <- data.frame(model = model_label, rhat_IsValid = rhat_IsValid,
+                      rhat_max = rhat_max, looic = as.numeric(myloo),
+                      waic = as.numeric(mywaic))
+  if (IsSave == 1) {
+    write.table(df_mc, paste0(savedir, "modelcomparison_1b.csv"),
+                row.names = F, quote = F, sep = ",")
+  }
+  df_mc
+}
+```
+
+```{r run-model-comparison}
+if (file.exists(paste0(stanfit_savedir, "modelcomparison_1b.csv"))) {
+  df_mc <- read.table(paste0(stanfit_savedir, "modelcomparison_1b.csv"),
+                      header = T, sep = ",")
+} else {
+  df_mc <- model_comparison_wrapper(model_label = models,
+                                    rstan_dir = stanfit_savedir,
+                                    df_input = df, N_iter = nIter, IsSave = 1)
+}
+df_mc <- df_mc %>% filter(model %in% models)
+print(df_mc)
+```
+
+```{r figure-S4A}
+# Delta model evidence relative to the worst-fitting model; Model 1-4 is best
+# (delta LOOIC approximately -1133).
+mc_plot <- df_mc %>%
+  mutate(Model = paste0(" Model ", sub("DJ_1b_rescale_m", "", model)),
+         delta = looic - max(looic),
+         is_best = model == "DJ_1b_rescale_m1-4")
+
+ggplot(mc_plot, aes(x = reorder(Model, looic), y = delta)) +
+  geom_bar(stat = "identity", width = 0.55, color = "black", linewidth = 0.4,
+           alpha = 0.7, fill = "lightgrey") +
+  geom_bar(data = subset(mc_plot, is_best), stat = "identity",
+           width = 0.55, color = "black", linewidth = 1.8, fill = NA) +
+  geom_text(aes(label = round(delta)), hjust = -0.1, size = 5) +
+  labs(title = "Model Comparison", x = "Model",
+       y = "Δlog Model Evidence (LOOIC)") +
+  coord_flip(ylim = c(-1250, 0)) +
+  scale_y_reverse() +
+  theme_minimal() + myconfig +
+  theme(legend.position = "none", axis.line.y = element_blank(),
+        axis.text.y = element_text(size = 14, hjust = 1, margin = margin(r = 0)))
+
+ggsave(paste0(plot_savedir, "FigureS4A.png"),
+       width = 7, height = 5, dpi = 600)
+```
+
+# 4. Best-fitting model (Model 1-4) parameters
+
+```{r winning-model}
+m_win    <- 4
+winmodel <- models[m_win]
+fitname  <- paste0(stanfit_savedir, winmodel, "_hbm_3000.RData")
+
+pars_win     <- create_pois(paste0(winmodel, "_hbm"))
+N_group_pars <- sum(stringr::str_detect(pars_win, "mu_"))
+ind_pars     <- pars_win[1:(length(pars_win) - 4 - N_group_pars)]
+
+indpm_file    <- paste0(stanfit_savedir, "winmodel_", winmodel, "_indpm.csv")
+ppc_mean_file <- paste0(stanfit_savedir, winmodel, "_Rating_pred_orig_mean.csv")
+
+# The 1.16 GB fitted object is loaded ONLY if the cached parameter / prediction
+# files are missing; otherwise the cached CSVs below are used directly.
+if (!file.exists(indpm_file) || !file.exists(ppc_mean_file)) {
+  fit <- readRDS(fitname)
+}
+```
+
+```{r extract-individual-params}
+get_pm_individual <- function(df_input, pars_input, df_input1, N_Chains) {
+  Sbj_label <- unique(df_input1$participant)
+  pars_value_all <- get_posterior_mean(df_input$fit, pars = pars_input)[, N_Chains + 1]
+  data.frame(pars_value = pars_value_all,
+             pars_name  = rep(pars_input, each = length(Sbj_label)),
+             SbjIdx     = rep(Sbj_label, times = length(pars_input)))
+}
+
+if (!file.exists(indpm_file)) {
+  df_idx <- df %>% group_by(TrialNo_stan) %>% mutate(SbjIdx = 1:n()) %>% ungroup()
+  df_pm_individual <- get_pm_individual(fit, ind_pars, df_idx, nChains)
+  write.table(df_pm_individual, indpm_file, row.names = F, quote = F, sep = ",")
+}
+
+df_pm_individual <- read.csv(indpm_file)
+parameter_gamma <- df_pm_individual %>% filter(pars_name %in% c("gamma_help", "gamma_punish"))
+parameter_k     <- df_pm_individual %>% filter(pars_name %in% c("k_help", "k_punish"))
+```
+
+```{r param-ttests}
+# Compensation (help) vs punishment (punish), paired t-tests
+g_wide <- parameter_gamma %>% pivot_wider(names_from = pars_name, values_from = pars_value)
+k_wide <- parameter_k     %>% pivot_wider(names_from = pars_name, values_from = pars_value)
+
+t.test(g_wide$gamma_help, g_wide$gamma_punish, paired = TRUE)   # Figure 1C: gamma_C vs gamma_P
+t.test(k_wide$k_help,     k_wide$k_punish,     paired = TRUE)   # Figure 1C: kappa_C vs kappa_P
+```
+
+```{r figure-1C-helper}
+plot_param_violin <- function(d, ylim, ybreaks, xlab, outfile) {
+  lvls <- sort(unique(d$pars_name))          # *_help (compensation), *_punish (punishment)
+  tt   <- t.test(d$pars_value[d$pars_name == lvls[1]],
+                 d$pars_value[d$pars_name == lvls[2]], paired = TRUE)
+  sig  <- ifelse(tt$p.value <= .001, "***",
+          ifelse(tt$p.value <= .01, "**",
+          ifelse(tt$p.value <= .05, "*", "ns")))
+  ytop <- max(d$pars_value)
+
+  ggplot(d, aes(x = pars_name, y = pars_value, fill = pars_name, color = pars_name)) +
+    geom_violin(alpha = 0.3, size = 0.8) +
+    geom_quasirandom(shape = 16, size = 1.5, alpha = 0.4, width = 0.2) +
+    geom_line(aes(group = SbjIdx), color = "grey70", alpha = 0.4) +
+    stat_summary(fun = mean, geom = "crossbar", width = 0.4, color = "black", size = 0.2) +
+    stat_summary(fun.data = mean_se, geom = "errorbar", width = 0.15, color = "black", size = 0.5) +
+    annotate("text", x = 1.5, y = ytop + 0.09, label = sig, size = 6) +
+    geom_segment(x = 1, xend = 2, y = ytop + 0.07, yend = ytop + 0.07, color = "black") +
+    scale_y_continuous(limits = ylim, breaks = ybreaks) +
+    scale_fill_manual(values = c("grey88", "grey88")) +
+    scale_color_manual(values = c("#5B8DB8", "#C06060")) +
+    scale_x_discrete(labels = c("Compensation", "Punishment")) +
+    labs(title = " ", x = xlab, y = "Parameter Value") +
+    theme_minimal() + myconfig +
+    theme(legend.position = "none", axis.line.x = element_blank(),
+          axis.ticks = element_line(size = 0.8, color = "black"),
+          axis.ticks.length = unit(0.2, "cm"),
+          axis.text   = element_text(size = 15),
+          axis.title.x = element_text(size = 16, vjust = -1, face = "bold"),
+          axis.title.y = element_text(size = 16, vjust = 1,  face = "bold"),
+          axis.text.x = element_text(color = c("#5B8DB8", "#C06060"), size = 15))
+
+  ggsave(paste0(plot_savedir, outfile), width = 4.5, height = 4)
+}
+```
+
+```{r figure-1C}
+plot_param_violin(parameter_gamma, ylim = c(-0.8, 0.7), ybreaks = seq(-0.8, 0.7, 0.3),
+                  xlab = "Inequity Aversion (γ)", outfile = "Figure1C_gamma.png")
+plot_param_violin(parameter_k, ylim = c(-0.05, 0.55), ybreaks = seq(0, 0.5, 0.1),
+                  xlab = "Discount Rate (κ)", outfile = "Figure1C_kappa.png")
+```
+
+# 5. Posterior predictive checks (Figure S4C, Figure S4B)
+
+```{r ppc-trial-means}
+y_label <- if (stringr::str_detect(winmodel, "rescale")) "q4_modi" else "q4"
+
+if (!file.exists(ppc_mean_file)) {
+  # Extract trial-level predicted ratings from the fitted object (only when the
+  # cached file is absent).
+  df_idx <- df %>% group_by(TrialNo_stan) %>% mutate(SbjIdx = 1:n()) %>% ungroup()
+  Rating_pred_orig <- as.data.frame(rstan::extract(fit$fit, pars = "Rating_pred", permuted = F))
+  col_names <- as.data.frame(colnames(Rating_pred_orig))
+
+  Rating_pred_orig_byChain <- t(Rating_pred_orig) %>% as.data.frame() %>%
+    rowwise() %>% mutate(pred_mean = mean(c_across(1:1000))) %>% as.data.frame() %>%
+    dplyr::select(1001) %>% cbind(col_names) %>% dplyr::rename(Rowname_orig = 2) %>%
+    mutate(ChainIdx = as.numeric(str_sub(Rowname_orig, 7, 7)),
+           SbjIdx_orig = str_sub(Rowname_orig, 21, nchar(Rowname_orig) - 3),
+           TrialNo_stan_orig = str_sub(Rowname_orig, nchar(Rowname_orig) - 2, nchar(Rowname_orig) - 1)) %>%
+    mutate(SbjIdx = as.numeric(ifelse(str_detect(SbjIdx_orig, ","),
+                  str_sub(SbjIdx_orig, 1, nchar(SbjIdx_orig) - 1), SbjIdx_orig)),
+           TrialNo_stan = as.numeric(ifelse(str_detect(TrialNo_stan_orig, ","),
+                  str_sub(TrialNo_stan_orig, 2, nchar(TrialNo_stan_orig)), TrialNo_stan_orig))) %>%
+    dplyr::select(-SbjIdx_orig, -TrialNo_stan_orig, -Rowname_orig)
+
+  Rating_pred_orig_mean <- Rating_pred_orig_byChain %>%
+    spread(ChainIdx, pred_mean) %>% rowwise() %>%
+    mutate(pred_mean = mean(c_across(3:6))) %>% as.data.frame() %>%
+    dplyr::select(SbjIdx, TrialNo_stan, pred_mean) %>%
+    merge(df_idx, by = c("SbjIdx", "TrialNo_stan")) %>% arrange(SbjIdx, TrialNo_stan)
+
+  write.table(Rating_pred_orig_mean, ppc_mean_file, row.names = F, quote = F, sep = ",")
+}
+
+Rating_pred_orig_mean <- read.table(ppc_mean_file, header = T, sep = ",")
+```
+
+```{r ppc-correlations}
+# Per-subject mean predicted vs observed, by condition; correlation per type
+pred_persbj <- Rating_pred_orig_mean %>%
+  group_by(participant, type) %>%
+  summarise(pred = mean(pred_mean), obs = mean(.data[[y_label]]), .groups = "drop")
+
+pred_persbj %>% group_by(type) %>%
+  summarise(corr = cor(pred, obs, use = "complete.obs"))   # Figure S4C: rs > 0.97
+```
+
+```{r figure-S4C}
+ggplot(pred_persbj, aes(x = obs, y = pred, color = type)) +
+  geom_point(size = 3, alpha = .8) +
+  geom_abline(intercept = 0, slope = 1, size = 0.5, linetype = "dashed", color = "black") +
+  scale_color_manual(name = "", values = c("#5B8DB8", "#C06060"),
+                     labels = c("Compensation", "Punishment")) +
+  scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+  labs(x = "Actual Rating", y = "Predicted") +
+  theme_bw() + myconfig +
+  theme(axis.text    = element_text(size = 16),
+        axis.title.x = element_text(size = 16, face = "bold"),
+        axis.title.y = element_text(size = 16, face = "bold"),
+        legend.text  = element_text(size = 15),
+        aspect.ratio = 1)
+
+ggsave(paste0(plot_savedir, "FigureS4C.png"), width = 5.6, height = 4, dpi = 300)
+```
+
+```{r figure-S4B}
+# Model-predicted vs observed justice ratings across delay (original -50..50 scale)
+type_labels <- c("help" = "Compensation", "punish" = "Punishment")
+df_delay <- Rating_pred_orig_mean %>%
+  mutate(Actual = q4, Predicted = (pred_mean - 0.5) * 100) %>%
+  group_by(participant, delay, type) %>%
+  summarise(obs = mean(Actual), pred = mean(Predicted), .groups = "drop") %>%
+  group_by(delay, type) %>%
+  summarise(obs_mean = mean(obs), obs_se = sd(obs) / sqrt(n()),
+            pred_mean = mean(pred), .groups = "drop")
+
+# Compensation = blue, punishment = red (matching the parameter figures); within
+# each panel, observed = hollow points (+/- SEM) and predicted = solid line.
+type_cols <- c("help" = "#5B8DB8", "punish" = "#C06060")
+
+ggplot(df_delay, aes(x = delay, color = type)) +
+  geom_errorbar(aes(y = obs_mean, ymin = obs_mean - obs_se, ymax = obs_mean + obs_se),
+                width = 10, size = 0.5) +
+  geom_point(aes(y = obs_mean, shape = "Observed"), fill = "white", size = 3, stroke = 0.9) +
+  geom_line(aes(y = pred_mean, linetype = "Predicted"), size = 1) +
+  facet_wrap(~type, scales = "free", labeller = labeller(type = type_labels)) +
+  scale_color_manual(values = type_cols, guide = "none") +
+  scale_shape_manual(name = "", values = c("Observed" = 21)) +
+  scale_linetype_manual(name = "", values = c("Predicted" = "solid")) +
+  labs(x = "Temporal Delay (day)", y = "Justice Rating") +
+  scale_x_continuous(breaks = c(0, 30, 90, 365)) +
+  coord_cartesian(ylim = c(0, 40)) +
+  scale_y_continuous(breaks = seq(0, 40, 10)) +
+  theme_minimal() + myconfig +
+  theme(panel.spacing = unit(2, "cm"), legend.position = "top")
+
+ggsave(paste0(plot_savedir, "FigureS4B.png"), width = 8, height = 4)
+```
