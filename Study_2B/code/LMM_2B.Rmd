@@ -11,7 +11,8 @@ inefficiency (in this dataset the corresponding records carry exp_name "dj_1a").
 Output map:
 - Table S3 (Study 2B column)  -> Model 1 (lm1) and Model 2 (lm2) summaries
 - Main-text simple-slope stats -> "Simple slopes" blocks under Model 1 / Model 2
-- Table S4 (additional ratings)-> lmq1 (injustice A), lmq2 (empathy B), lmq3 (justice C)
+- Table S4 (Control-regressor)  -> lm_control_q123_m1 (Model 1 + covariates), lm_control_q123_m2 (Model 2 + covariates)
+- Table S5 (additional ratings)-> lmq1 (unfairness A), lmq2 (empathy B), lmq3 (justice C)
 - Figure 2B (justice by delay) -> Figure2B.png
 - Figure S6 (additional ratings)-> FigureS6.png
 
@@ -129,7 +130,40 @@ slopes_way <- emtrends(lm2, ~ type, var = "z.log.delay")
 summary(slopes_way, infer = c(TRUE, TRUE))
 ```
 
-# 5. Additional ratings (Table S4)
+# 5. Control-regressor model (Table S4)
+
+This sensitivity analysis tests whether the Delay x Severity effect on perceived
+justice of the whole event remains after simultaneously controlling for the three
+additional ratings: perceived unfairness of Player A, empathy for Player B, and
+perceived justice of Player C's decision.
+
+```{r combined-control-regressor-model-1}
+# Model 1 structure (Delay x Severity, controlling for Mode) + q1 + q2 + q3
+lm_control_q123_m1 <- lmer(q4 ~ z.inequality * z.log.delay + type + q1 + q2 + q3 +
+                              (1 + z.inequality + z.log.delay + type | participant),
+                            data = dat, control = lmerControl(optCtrl = list(maxfun = 20000)))
+
+isSingular(lm_control_q123_m1)
+summary(lm_control_q123_m1)
+confint(lm_control_q123_m1, method = "Wald")
+```
+
+```{r combined-control-regressor-model-2}
+# Model 2 structure (Delay x Severity x Mode) + q1 + q2 + q3
+lm_control_q123_m2 <- lmer(q4 ~ z.inequality * z.log.delay * type + q1 + q2 + q3 +
+                              (1 + z.inequality + z.log.delay + type | participant),
+                            data = dat, control = lmerControl(optCtrl = list(maxfun = 20000)))
+
+isSingular(lm_control_q123_m2)
+summary(lm_control_q123_m2)
+confint(lm_control_q123_m2, method = "Wald")
+```
+
+# 6. Additional ratings (Table S5)
+
+Same fixed-effect structure applied to the three control ratings, confirming
+the Delay x Severity effect is specific to the perceived justice of the whole
+event.
 
 ```{r additional-ratings}
 lmq1 <- lmer(q1 ~ z.inequality * z.log.delay + type +
@@ -146,33 +180,6 @@ lmq3 <- lmer(q3 ~ z.inequality * z.log.delay + type +
                (1 + z.inequality + z.log.delay + type | participant),
              data = dat, control = lmerControl(optCtrl = list(maxfun = 20000)))
 summary(lmq3)   # Perceived justice of Player C's decision
-```
-
-# 6. Combined control-regressor model
-
-This sensitivity analysis tests whether the Delay x Severity effect on perceived
-justice of the whole event remains after simultaneously controlling for the three
-additional ratings: perceived unfairness of Player A, empathy for Player B, and
-perceived justice of Player C's decision.
-
-```{r combined-control-regressor-model}
-lm_control_q123 <- lmer(q4 ~ z.inequality * z.log.delay + type + q1 + q2 + q3 +
-                          (1 + z.inequality + z.log.delay + type | participant),
-                        data = dat, control = lmerControl(optCtrl = list(maxfun = 20000)))
-
-isSingular(lm_control_q123)
-summary(lm_control_q123)
-confint(lm_control_q123, method = "Wald")
-```
-
-```{r combined-control-regressor-model}
-lm_control_q123 <- lmer(q4 ~ z.inequality * z.log.delay * type + q1 + q2 + q3 +
-                          (1 + z.inequality + z.log.delay + type | participant),
-                        data = dat, control = lmerControl(optCtrl = list(maxfun = 20000)))
-
-isSingular(lm_control_q123)
-summary(lm_control_q123)
-confint(lm_control_q123, method = "Wald")
 ```
 
 # 7. Figures by Delay and Severity (Figure 2B + Figure S6)
