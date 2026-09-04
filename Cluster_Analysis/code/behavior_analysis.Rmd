@@ -1,0 +1,241 @@
+---
+title: "Behavioral signatures of the computational subtypes"
+output: html_document
+date: "2025-11-12"
+---
+
+Model-free behavioral signatures of the four computational subtypes. The k-means
+solution from cluster_analysis.Rmd is reconstructed (same seed and labeling), then
+three behavioral measures are computed per participant from the pooled Study 1B +
+2B data: overall justice rating, injustice-severity sensitivity (slope of ratings
+on severity), and delay sensitivity (slope of ratings on log-transformed delay).
+
+Output map:
+- Kruskal-Wallis H / eta^2 on the three measures -> printed below
+- Figure 3B (behavioral signatures)              -> Figure3B_behavioral.png
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r libraries-and-theme}
+library(pacman)
+pacman::p_load(tidyverse, ggplot2, rstatix, patchwork)
+
+rootdir         <- "D:/DJ/JEPG/Cluster_Analysis"
+data_savedir    <- paste0(rootdir, "/data/")
+stanfit_savedir <- paste0(rootdir, "/output/stanfits/")
+plot_savedir    <- paste0(rootdir, "/output/figures/")
+if (!dir.exists(plot_savedir)) dir.create(plot_savedir, recursive = TRUE)
+
+subtype_levels <- c("B", "E", "C", "D")
+subtype_colors <- c("B" = "#A1D99B", "E" = "#74C476", "C" = "#238B45", "D" = "#00441B")
+subtype_name   <- c("B" = "Balanced observers",
+                    "E" = "Equity-preferred evaluators",
+                    "C" = "Compensatory moralists",
+                    "D" = "Delay-averse evaluators")
+subtype_color_scale <- scale_color_manual(values = subtype_colors, name = "Subtype",
+                                           labels = subtype_name, guide = "none")
+type_labels <- c(help = "Compensation", punish = "Punishment")
+
+theme_nature <- function(base_size = 16, base_family = "sans") {
+  theme_classic(base_size = base_size, base_family = base_family) +
+    theme(axis.line = element_line(color = "black", linewidth = 1),
+          axis.ticks = element_line(color = "black", linewidth = 0.8),
+          axis.text = element_text(color = "black", size = 14),
+          axis.title.x = element_text(size = 18, face = "bold", margin = margin(t = 8)),
+          axis.title.y = element_text(size = 18, face = "bold", margin = margin(r = 8)),
+          legend.title = element_text(size = 16, face = "bold"),
+          legend.text = element_text(size = 14),
+          panel.grid = element_blank(),
+          strip.background = element_blank(),
+          strip.text = element_text(size = 16, face = "bold"),
+          panel.spacing = unit(0.5, "cm"))
+}
+theme_set(theme_nature())
+```
+
+# 1. Reconstruct the four subtypes
+
+```{r clustering}
+target_pars <- c("gamma_help", "gamma_punish", "k_help", "k_punish")
+
+df_wide <- read_csv(paste0(stanfit_savedir, "winmodel_DJ_all_rescale_m1-4_indpm.csv"),
+                    show_col_types = FALSE) %>%
+  filter(pars_name %in% target_pars) %>%
+  pivot_wider(names_from = pars_name, values_from = pars_value) %>%
+  na.omit()
+
+param_matrix <- scale(df_wide[, target_pars])
+set.seed(123)
+km_res <- kmeans(param_matrix, centers = 4, nstart = 25)
+df_wide$cluster <- as.factor(km_res$cluster)
+
+# Same centroid-based labeling as cluster_analysis.Rmd
+ctr  <- as.data.frame(km_res$centers)
+id_D <- which.max(rowMeans(ctr[, c("k_help", "k_punish")]))
+rem  <- setdiff(1:4, id_D)
+id_E <- rem[which.max(rowMeans(ctr[rem, c("gamma_help", "gamma_punish")]))]
+rem  <- setdiff(rem, id_E)
+id_C <- rem[which.max(abs(ctr$gamma_help - ctr$gamma_punish)[rem])]
+id_B <- setdiff(rem, id_C)
+cluster_code <- setNames(c("B", "E", "C", "D"), as.character(c(id_B, id_E, id_C, id_D)))
+df_wide$subtype <- factor(cluster_code[as.character(df_wide$cluster)], levels = subtype_levels)
+df_wide$subtype_label <- factor(subtype_name[as.character(df_wide$subtype)],
+                                levels = subtype_name[subtype_levels])
+
+print(table(df_wide$subtype))
+```
+
+# 2. Load behavior and attach subtype labels
+
+```{r merge-data}
+df_beh_clust <- read_csv(paste0(data_savedir, "DJ_all_data4stan.csv"), show_col_types = FALSE) %>%
+  left_join(df_wide %>% dplyr::select(SbjIdx, subtype, subtype_label), by = c("participant" = "SbjIdx")) %>%
+  filter(!is.na(subtype)) %>%
+  mutate(type = factor(type, levels = c("help", "punish")), log_delay = log(delay + 0.5))
+
+cat("Participants:", length(unique(df_beh_clust$participant)),
+    "  Trials:", nrow(df_beh_clust), "\n")
+```
+
+# 3. Per-participant behavioral measures (pooled across conditions)
+
+```{r measures-pooled}
+# Overall justice rating
+rating_pool <- df_beh_clust %>%
+  group_by(subtype, participant) %>%
+  summarise(value = mean(q4, na.rm = TRUE), .groups = "drop")
+
+# Injustice-severity sensitivity: slope of condition-mean rating on severity
+sev_pool <- df_beh_clust %>%
+  group_by(subtype, participant, Inequality) %>%
+  summarise(m = mean(q4, na.rm = TRUE), .groups = "drop") %>%
+  group_by(subtype, participant) %>%
+  summarise(value = coef(lm(m ~ Inequality))[2], .groups = "drop")
+
+# Delay sensitivity: slope of condition-mean rating on log-transformed delay
+delay_pool <- df_beh_clust %>%
+  group_by(subtype, participant, log_delay) %>%
+  summarise(m = mean(q4, na.rm = TRUE), .groups = "drop") %>%
+  group_by(subtype, participant) %>%
+  summarise(value = coef(lm(m ~ log_delay))[2], .groups = "drop")
+```
+
+# 4. Kruskal-Wallis tests across subtypes (H, eta^2)
+
+```{r kruskal-wallis}
+kw_report <- function(d, measure) {
+  kt <- kruskal_test(d, value ~ subtype)
+  es <- kruskal_effsize(d, value ~ subtype)
+  data.frame(measure = measure, H = round(kt$statistic, 2), df = kt$df,
+             p = signif(kt$p, 3), eta2 = round(es$effsize, 2))
+}
+
+bind_rows(
+  kw_report(rating_pool, "Overall justice rating"),
+  kw_report(delay_pool,  "Delay sensitivity"),
+  kw_report(sev_pool,    "Injustice-severity sensitivity")
+)
+
+# Subtype medians referenced in the main text
+cat("\nMedian overall rating by subtype:\n")
+print(rating_pool %>% group_by(subtype) %>% summarise(Mdn = round(median(value), 2)))
+cat("\nMedian delay sensitivity by subtype:\n")
+print(delay_pool %>% group_by(subtype) %>% summarise(Mdn = round(median(value), 2)))
+cat("\nMedian injustice-severity sensitivity by subtype:\n")
+print(sev_pool %>% group_by(subtype) %>% summarise(Mdn = round(median(value), 2)))
+```
+
+# 5. Figure 3B: behavioral signatures (mean +/- SE, by condition)
+
+```{r figure-3B}
+# Same three measures computed separately within compensation / punishment
+subj_rating <- df_beh_clust %>%
+  group_by(subtype, subtype_label, participant, type) %>%
+  summarise(value = mean(q4, na.rm = TRUE), .groups = "drop") %>%
+  mutate(metric = "Mean justice rating")
+
+subj_sev <- df_beh_clust %>%
+  group_by(subtype, subtype_label, participant, type, Inequality) %>%
+  summarise(m = mean(q4, na.rm = TRUE), .groups = "drop") %>%
+  group_by(subtype, subtype_label, participant, type) %>%
+  summarise(value = coef(lm(m ~ Inequality))[2], .groups = "drop") %>%
+  mutate(metric = "Injustice-severity sensitivity")
+
+subj_delay <- df_beh_clust %>%
+  group_by(subtype, subtype_label, participant, type, log_delay) %>%
+  summarise(m = mean(q4, na.rm = TRUE), .groups = "drop") %>%
+  group_by(subtype, subtype_label, participant, type) %>%
+  summarise(value = coef(lm(m ~ log_delay))[2], .groups = "drop") %>%
+  mutate(metric = "Delay sensitivity")
+
+df_profile <- bind_rows(subj_rating, subj_sev, subj_delay) %>%
+  group_by(subtype, subtype_label, type, metric) %>%
+  summarise(M = mean(value, na.rm = TRUE), SE = sd(value, na.rm = TRUE) / sqrt(n()),
+            .groups = "drop") %>%
+  mutate(metric = factor(metric, levels = c("Mean justice rating",
+                                            "Injustice-severity sensitivity",
+                                            "Delay sensitivity")))
+
+# Significant pairs from Dunn post-hoc (Bonferroni-corrected p < .05)
+# x positions: B=1, E=2, C=3, D=4 (matching subtype_levels order)
+sig_pairs <- list(
+  "Mean justice rating" = data.frame(
+    x1 = c(1, 2, 2), x2 = c(2, 3, 4), label = c("***", "***", "****")
+  ),
+  "Injustice-severity sensitivity" = data.frame(
+    x1 = c(1, 2, 2), x2 = c(2, 3, 4), label = c("****", "****", "****")
+  ),
+  "Delay sensitivity" = data.frame(
+    x1 = c(3, 1, 2), x2 = c(4, 3, 4), label = c("****", "***", "***")
+  )
+)
+
+make_panel <- function(metric_label) {
+  d <- filter(df_profile, metric == metric_label)
+
+  y_top   <- max(d$M + d$SE, na.rm = TRUE)
+  y_bot   <- min(d$M - d$SE, na.rm = TRUE)
+  y_range <- y_top - y_bot
+  step    <- y_range * 0.07
+
+  pairs <- sig_pairs[[metric_label]]
+  pairs$span <- pairs$x2 - pairs$x1
+  pairs <- pairs[order(pairs$span, pairs$x1), ]
+  pairs$y_bar <- y_top + step * seq_len(nrow(pairs))
+
+  p <- ggplot(d, aes(x = subtype, y = M, color = subtype, shape = type)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "gray50", linewidth = 0.7) +
+    geom_errorbar(aes(ymin = M - SE, ymax = M + SE), width = 0.2, linewidth = 0.9,
+                  position = position_dodge(width = 0.5)) +
+    geom_point(size = 4, position = position_dodge(width = 0.5)) +
+    subtype_color_scale +
+    scale_shape_manual(values = c(help = 16, punish = 17),
+                       labels = c(help = "Compensation", punish = "Punishment"),
+                       name = "Justice Mode") +
+    scale_x_discrete(labels = subtype_name) +
+    labs(x = "Subtype", y = metric_label) +
+    theme_nature() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+  # for (i in seq_len(nrow(pairs))) {
+  #   yb <- pairs$y_bar[i]
+  #   p <- p +
+  #     annotate("segment", x = pairs$x1[i], xend = pairs$x2[i],
+  #              y = yb, yend = yb, linewidth = 1.1, color = "black")
+  # }
+
+  # p + coord_cartesian(ylim = c(y_bot - y_range * 0.05,
+  #                               max(pairs$y_bar) + step * 0.6))
+  p
+}
+
+p_profile <- make_panel("Mean justice rating") +
+             make_panel("Injustice-severity sensitivity") +
+             make_panel("Delay sensitivity") +
+             plot_layout(nrow = 1, guides = "collect")
+
+ggsave(file.path(plot_savedir, "Figure3B_behavioral.png"),
+       p_profile, width = 15, height = 6, dpi = 300)
+```

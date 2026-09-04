@@ -1,0 +1,124 @@
+---
+title: "Cluster Analysis: joint hierarchical Bayesian fit (Model 1-4)"
+output: html_document
+date: "2023-10-25"
+---
+
+This script re-fits the best-fitting computational model (Model 1-4) to the
+COMBINED data from the two third-party economic-task studies (Study 1B + Study
+2B, pooled; N = 169) and extracts each participant's individual-level posterior
+means of the four parameters (gamma_help, gamma_punish, k_help, k_punish).
+
+Output: winmodel_DJ_all_rescale_m1-4_indpm.csv
+        -> the input to cluster_analysis.Rmd and behavior_analysis.Rmd
+
+The model fit is cached: if `DJ_all_rescale_m1-4_hbm_3000.RData` already exists in
+output/stanfits/ it is NOT re-fitted. The 2.67 GB fitted object is loaded only if
+the cached parameter CSV is missing.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r directories}
+# Root directory of the Cluster_Analysis submission folder.
+# Update this path if you place the folder elsewhere.
+rootdir         <- "D:/DJ/JEPG/Cluster_Analysis"
+data_savedir    <- paste0(rootdir, "/data/")
+code_savedir    <- paste0(rootdir, "/code/")
+stanfit_savedir <- paste0(rootdir, "/output/stanfits/")
+
+# Sources rstan/loo/tidyverse and defines DJ_rstan_fit / prep_data4stan / create_pois
+source(paste0(code_savedir, "DJ_rstan_fit_4cluster.R"))
+
+nIter   <- 3000
+nwarmup <- 2000
+nChains <- 4
+
+models      <- c("DJ_all_rescale_m1-4")
+modelno     <- length(models)
+stanfitlist <- dir(stanfit_savedir)
+```
+
+# 1. Prepare the combined data for Stan (Study 1B + 2B pooled)
+
+```{r prep4stan}
+library(DescTools)
+
+if (!file.exists(paste0(data_savedir, "DJ_all_data4stan.csv"))) {
+  df_valid <- read_csv(paste0(data_savedir, "DJ1_200_merge.csv")) %>%
+    filter(type != "control") %>%
+    filter(participant != "NA") %>%       # pool ALL participants (both studies)
+    rename(q1 = A_justice, q2 = B_empathy, q3 = C_justice, q4 = question4) %>%
+    mutate(Delay_num   = delay,
+           Delay_month = case_when(delay == 0 ~ 0, delay == 1 ~ 0.03,
+                                   delay == 10 ~ 0.33, delay == 30 ~ 1,
+                                   delay == 90 ~ 3, delay == 365 ~ 12),
+           Delay_year  = case_when(delay == 0 ~ 0, delay == 1 ~ 0.003,
+                                   delay == 10 ~ 0.027, delay == 30 ~ 0.08,
+                                   delay == 90 ~ 0.25, delay == 365 ~ 1),
+           type_idx = ifelse(type == "help", 0, 1),
+           z.q4     = as.numeric(scale(q4)),
+           q4_modi  = q4 / 100 + 0.5,
+           eff_keep = numA + numB, eff_alter = changeA + changeB,
+           s.eff_keep = eff_keep / 200, s.eff_alter = eff_alter / 200) %>%
+    group_by(participant) %>% mutate(TrialNo_stan = 1:n()) %>% ungroup() %>%
+    rowwise() %>% mutate(gini = Gini(c(numA, numB))) %>% as.data.frame()
+
+  write.table(df_valid, paste0(data_savedir, "DJ_all_data4stan.csv"),
+              row.names = F, quote = F, sep = ",")
+}
+
+df <- read_csv(paste0(data_savedir, "DJ_all_data4stan.csv"))
+```
+
+# 2. Fit Model 1-4 to the combined data (cached)
+
+```{r fit-model}
+for (m in 1:modelno) {
+  model_tmp <- paste0(models[m], "_hbm")
+  fitname   <- paste0(models[m], "_hbm_", toString(nIter), ".RData")
+
+  if (sum(stringr::str_detect(stanfitlist, fitname)) == 0) {
+    print(paste0(model_tmp, " is now being fitted ..."))
+    DJ_rstan_fit(modelStr = model_tmp, test = F, saveFit = T,
+                 nIter = nIter, nwarmup = nwarmup,
+                 data_dir = data_savedir, code_dir = code_savedir,
+                 savedir = stanfit_savedir)
+  } else {
+    print(paste0(model_tmp, " has been fitted ..."))
+  }
+}
+```
+
+# 3. Extract individual-level posterior means (the clustering input)
+
+```{r extract-individual-params}
+winmodel   <- models[1]
+fitname    <- paste0(stanfit_savedir, winmodel, "_hbm_3000.RData")
+indpm_file <- paste0(stanfit_savedir, "winmodel_", winmodel, "_indpm.csv")
+
+pars_win     <- create_pois(paste0(winmodel, "_hbm"))
+N_group_pars <- sum(stringr::str_detect(pars_win, "mu_"))
+ind_pars     <- pars_win[1:(length(pars_win) - 4 - N_group_pars)]
+
+get_pm_individual <- function(df_input, pars_input, df_input1, N_Chains) {
+  Sbj_label <- unique(df_input1$participant)
+  pars_value_all <- get_posterior_mean(df_input$fit, pars = pars_input)[, N_Chains + 1]
+  data.frame(pars_value = pars_value_all,
+             pars_name  = rep(pars_input, each = length(Sbj_label)),
+             SbjIdx     = rep(Sbj_label, times = length(pars_input)))
+}
+
+# Load the 2.67 GB fitted object only if the cached parameter file is missing.
+if (!file.exists(indpm_file)) {
+  fit <- readRDS(fitname)
+  df_pm_individual <- get_pm_individual(fit, ind_pars, df, nChains)
+  write.table(df_pm_individual, indpm_file, row.names = F, quote = F, sep = ",")
+}
+
+df_pm_individual <- read.csv(indpm_file)
+cat("Participants in joint fit:",
+    length(unique(df_pm_individual$SbjIdx)), "\n")
+head(df_pm_individual)
+```

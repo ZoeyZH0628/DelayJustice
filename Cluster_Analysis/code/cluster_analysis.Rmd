@@ -1,0 +1,254 @@
+---
+title: "Cluster analysis of individual computational profiles"
+output: html_document
+date: "2025-11-12"
+---
+
+K-means clustering of participants' computational parameters (gamma_help,
+gamma_punish, k_help, k_punish) from the joint Model 1-4 fit (Study 1B + 2B
+pooled; N = 169), produced by stan_model_Cluster_Analysis.Rmd.
+
+Output map:
+- Figure S8A (elbow + silhouette) -> FigureS8A_elbow.png + FigureS8A_silhouette.png
+- Figure S8B (PCA space)          -> FigureS8B_pca.png
+- Exploratory parameter boxplots -> Figure12A_parameters.png  [diagnostic only; not in final manuscript/SOM]
+- Figure 3A  (radar profiles)     -> Figure3A_radar.png
+- Figure S8A (silhouette, right)  -> FigureS8A_silhouette.png
+- Table 1 (sizes + mean params)   -> printed below
+
+The behavioral signatures of the subtypes (Figure 3B) are produced by
+behavior_analysis.Rmd.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r libraries-and-theme}
+library(pacman)
+pacman::p_load(tidyverse, ggplot2, scales, factoextra, rstatix, multcompView,
+               patchwork)
+
+rootdir         <- "D:/DJ/JEPG/Cluster_Analysis"
+data_savedir    <- paste0(rootdir, "/data/")
+stanfit_savedir <- paste0(rootdir, "/output/stanfits/")
+plot_savedir    <- paste0(rootdir, "/output/figures/")
+if (!dir.exists(plot_savedir)) dir.create(plot_savedir, recursive = TRUE)
+
+# Green palette for the four subtypes (light -> dark), keyed by subtype code
+subtype_levels <- c("B", "E", "C", "D")
+subtype_colors <- c("B" = "#A1D99B", "E" = "#74C476", "C" = "#238B45", "D" = "#00441B")
+subtype_name   <- c("B" = "Balanced observers",
+                    "E" = "Equity-preferred evaluators",
+                    "C" = "Compensatory moralists",
+                    "D" = "Delay-averse evaluators")
+seq_low  <- "#E5F5E0"; seq_high <- "#00441B"
+
+theme_nature <- function(base_size = 16, base_family = "sans") {
+  theme_classic(base_size = base_size, base_family = base_family) +
+    theme(axis.line = element_line(color = "black", linewidth = 1),
+          axis.ticks = element_line(color = "black", linewidth = 0.8),
+          axis.text = element_text(color = "black", size = 14),
+          axis.title.x = element_text(size = 18, face = "bold", margin = margin(t = 8)),
+          axis.title.y = element_text(size = 18, face = "bold", margin = margin(r = 8)),
+          legend.title = element_text(size = 16, face = "bold"),
+          legend.text = element_text(size = 14),
+          panel.grid = element_blank(),
+          strip.background = element_blank(),
+          strip.text = element_text(size = 18, face = "bold"),
+          panel.spacing = unit(0.5, "cm"))
+}
+theme_set(theme_nature())
+```
+
+# 1. Load joint-fit parameters and standardize
+
+```{r load-params}
+target_pars <- c("gamma_help", "gamma_punish", "k_help", "k_punish")
+
+df_wide <- read_csv(paste0(stanfit_savedir, "winmodel_DJ_all_rescale_m1-4_indpm.csv"),
+                    show_col_types = FALSE) %>%
+  filter(pars_name %in% target_pars) %>%
+  pivot_wider(names_from = pars_name, values_from = pars_value) %>%
+  na.omit()
+
+# z-standardize the four parameters before clustering
+param_matrix <- scale(df_wide[, target_pars])
+```
+
+# 2. Number of clusters: elbow and silhouette (Figure S8A)
+
+```{r figure-S8A-elbow}
+p_wss <- fviz_nbclust(param_matrix, kmeans, method = "wss") +
+  geom_vline(xintercept = 4, linetype = "dashed", color = "gray35", linewidth = 0.9) +
+  labs(x = "Number of clusters (k)", y = "Total within-cluster sum of squares") +
+  theme_nature()
+for (i in seq_along(p_wss$layers)) p_wss$layers[[i]]$aes_params$colour <- "gray25"
+ggsave(file.path(plot_savedir, "FigureS8A_elbow.png"), p_wss, width = 6, height = 5, dpi = 300)
+
+p_sil <- fviz_nbclust(param_matrix, kmeans, method = "silhouette") +
+  labs(x = "Number of clusters (k)", y = "Average silhouette width") +
+  theme_nature()
+for (i in seq_along(p_sil$layers)) p_sil$layers[[i]]$aes_params$colour <- "gray25"
+ggsave(file.path(plot_savedir, "FigureS8A_silhouette.png"), p_sil, width = 6, height = 5, dpi = 300)
+```
+
+# 3. K-means clustering (k = 4) and subtype labeling
+
+```{r kmeans}
+set.seed(123)
+km_res <- kmeans(param_matrix, centers = 4, nstart = 25)
+df_wide$cluster <- as.factor(km_res$cluster)
+
+# Variance accounted for by the 4-cluster solution (main text: 54%)
+cat(sprintf("Variance accounted for (betweenss/totss) = %.1f%%\n",
+            100 * km_res$betweenss / km_res$totss))
+
+# Label the four clusters from their centroid signatures, independent of the
+# arbitrary k-means numbering:
+#   D = steepest temporal discounting; E = strongest (symmetric) inequity aversion;
+#   C = largest compensation-vs-punishment asymmetry in gamma; B = the remainder.
+ctr        <- as.data.frame(km_res$centers)
+id_D       <- which.max(rowMeans(ctr[, c("k_help", "k_punish")]))
+rem        <- setdiff(1:4, id_D)
+id_E       <- rem[which.max(rowMeans(ctr[rem, c("gamma_help", "gamma_punish")]))]
+rem        <- setdiff(rem, id_E)
+id_C       <- rem[which.max(abs(ctr$gamma_help - ctr$gamma_punish)[rem])]
+id_B       <- setdiff(rem, id_C)
+
+cluster_code <- setNames(c("B", "E", "C", "D"),
+                         as.character(c(id_B, id_E, id_C, id_D)))
+df_wide$subtype <- factor(cluster_code[as.character(df_wide$cluster)], levels = subtype_levels)
+df_wide$subtype_label <- factor(subtype_name[as.character(df_wide$subtype)],
+                                levels = subtype_name[subtype_levels])
+```
+
+# 4. Table 1: subtype labels, sizes, and mean parameters
+
+```{r table-1}
+table1 <- df_wide %>%
+  group_by(subtype) %>%
+  summarise(n = n(),
+            pct        = round(100 * n() / nrow(df_wide), 1),
+            gamma_C    = round(mean(gamma_help), 2),
+            gamma_P    = round(mean(gamma_punish), 2),
+            kappa_C    = round(mean(k_help), 2),
+            kappa_P    = round(mean(k_punish), 2),
+            .groups = "drop") %>%
+  mutate(label = subtype_name[as.character(subtype)]) %>%
+  arrange(subtype)
+print(as.data.frame(table1))
+```
+
+# 5. Figure S8B: subtypes in principal-component space
+
+```{r figure-S8B-pca}
+km_plot <- km_res
+km_plot$cluster <- factor(subtype_name[cluster_code[as.character(km_res$cluster)]],
+                          levels = subtype_name[subtype_levels])
+
+p_pca <- fviz_cluster(km_plot, data = param_matrix,
+                      palette = unname(subtype_colors[subtype_levels]),
+                      geom = "point", pointsize = 2.6,
+                      ellipse.type = "norm", ellipse.alpha = 0.12, ellipse.level = 0.95,
+                      ggtheme = theme_nature()) +
+  labs(title = NULL, x = "Principal component 1", y = "Principal component 2",
+       color = "Subtype", fill = "Subtype", shape = "Subtype")
+ggsave(file.path(plot_savedir, "FigureS8B_pca.png"), p_pca, width = 9, height = 5, dpi = 300)
+```
+
+# 6. Exploratory diagnostic: parameter distributions by subtype (not in final manuscript/SOM)
+
+```{r exploratory-parameter-distributions, eval=FALSE}
+subtype_cols <- subtype_colors[subtype_levels]
+
+df_param_long <- df_wide %>%
+  dplyr::select(subtype, gamma_help, gamma_punish, k_help, k_punish) %>%
+  pivot_longer(-subtype, names_to = "parameter", values_to = "value") %>%
+  mutate(parameter = factor(parameter,
+            levels = c("gamma_help", "gamma_punish", "k_help", "k_punish"),
+            labels = c("gamma[C]", "gamma[P]", "kappa[C]", "kappa[P]")))
+
+# Compact-letter display from Kruskal-Wallis + Dunn post-hoc (Bonferroni)
+cld_tbl <- df_param_long %>% group_split(parameter) %>% purrr::map_dfr(function(d) {
+  dt <- dunn_test(d, value ~ subtype, p.adjust.method = "bonferroni")
+  pv <- setNames(dt$p.adj, paste(dt$group1, dt$group2, sep = "-"))
+  L  <- multcompLetters(pv, threshold = 0.05)$Letters
+  ws <- d %>% group_by(subtype) %>% summarise(w = max(value), .groups = "drop")
+  rng <- diff(range(d$value))
+  tibble(parameter = d$parameter[1], subtype = names(L), cld = unname(L)) %>%
+    left_join(ws, by = "subtype") %>% mutate(y = w + 0.06 * rng)
+})
+cld_tbl$subtype <- factor(cld_tbl$subtype, levels = subtype_levels)
+
+p_params <- ggplot(df_param_long, aes(x = subtype, y = value, fill = subtype)) +
+  geom_boxplot(width = 0.60, linewidth = 0.55, outlier.size = 0.7, outlier.alpha = 0.5) +
+  geom_text(data = cld_tbl, aes(x = subtype, y = y, label = cld), inherit.aes = FALSE,
+            size = 4.4, fontface = "bold", color = "gray20") +
+  facet_wrap(~ parameter, scales = "free_y", nrow = 1, labeller = label_parsed) +
+  scale_fill_manual(values = subtype_cols, guide = "none") +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 4),
+                     expand = expansion(mult = c(0.04, 0.12))) +
+  labs(x = "Subtype", y = "Parameter value") + theme_nature()
+
+ggsave(file.path(plot_savedir, "Figure12A_parameters.png"), p_params, width = 11, height = 3.6, dpi = 300)
+```
+
+# 7. Figure 3A: radar profiles of the four subtypes
+
+```{r figure-3A-radar}
+param_cols <- c("gamma_help", "gamma_punish", "k_help", "k_punish")
+
+cl_means <- df_wide %>% group_by(cluster) %>%
+  summarise(across(all_of(param_cols), mean, na.rm = TRUE), .groups = "drop")
+cl_n <- df_wide %>% count(cluster)
+
+# min-max normalize the subtype means (with 15% padding) for the radar shape
+p_min <- apply(cl_means[param_cols], 2, min); p_max <- apply(cl_means[param_cols], 2, max)
+pad <- 0.15 * (p_max - p_min); lo <- p_min - pad; hi <- p_max + pad
+cl_norm <- cl_means
+cl_norm[param_cols] <- mapply(function(x, l, h) pmax(0, pmin(1, (x - l) / (h - l))),
+                              cl_means[param_cols], lo, hi)
+
+make_radar <- function(vals, title_str, col, n_grid = 4) {
+  n <- length(vals)
+  angles <- seq(pi/2, pi/2 - 2*pi, length.out = n + 1)[-(n + 1)]
+  poly_df <- data.frame(x = c(vals * cos(angles), vals[1] * cos(angles[1])),
+                        y = c(vals * sin(angles), vals[1] * sin(angles[1])))
+  grid_df <- lapply(seq_len(n_grid) / n_grid, function(r) {
+    theta <- seq(0, 2*pi, length.out = 300)
+    data.frame(x = r * cos(theta), y = r * sin(theta), r = r) }) %>% bind_rows()
+  LR <- 1.32
+  axis_df <- data.frame(x1 = cos(angles), y1 = sin(angles),
+                        lx = LR * cos(angles), ly = LR * sin(angles),
+                        lbl = c("gamma[C]", "gamma[P]", "kappa[C]", "kappa[P]"),
+                        hjust = (1 - cos(angles)) / 2, vjust = (1 - sin(angles)) / 2)
+  pts_df <- data.frame(x = vals * cos(angles), y = vals * sin(angles))
+  ggplot() +
+    geom_path(data = grid_df, aes(x, y, group = r), color = "gray90", linewidth = 0.45) +
+    geom_segment(data = axis_df, aes(x = 0, y = 0, xend = x1, yend = y1),
+                 color = "gray85", linewidth = 0.5) +
+    geom_polygon(data = poly_df, aes(x, y), fill = col, alpha = 0.4, color = NA) +
+    geom_path(data = poly_df, aes(x, y), color = col, linewidth = 1.4) +
+    geom_point(data = pts_df, aes(x, y), color = col, fill = "white",
+               shape = 21, size = 3.2, stroke = 1.2) +
+    geom_text(data = axis_df, aes(x = lx, y = ly, label = lbl, hjust = hjust, vjust = vjust),
+              size = 7.5, fontface = "bold", color = "gray15", parse = TRUE) +
+    ggtitle(title_str) +
+    coord_equal(xlim = c(-1.7, 1.7), ylim = c(-1.7, 1.7), clip = "off") +
+    theme_void(base_family = "sans") +
+    theme(plot.title = element_text(hjust = 0.5, size = 18, face = "bold", color = "gray20",
+                                    lineheight = 1.0),
+          plot.margin = margin(t = 10, r = 22, b = 10, l = 22))
+}
+
+radar_plots <- lapply(seq_len(nrow(cl_norm)), function(i) {
+  cl <- cl_norm$cluster[i]
+  code <- cluster_code[as.character(cl)]
+  N <- cl_n$n[cl_n$cluster == cl]
+  make_radar(unlist(cl_norm[i, param_cols]),
+             paste0(gsub(" ", "\n", subtype_name[code]), "\n(N = ", N, ")"),
+             col = subtype_colors[code])
+})
+p_radar <- wrap_plots(radar_plots, nrow = 1)
+ggsave(file.path(plot_savedir, "Figure3A_radar.png"), p_radar, width = 16.5, height = 3.7, dpi = 300)
+```
