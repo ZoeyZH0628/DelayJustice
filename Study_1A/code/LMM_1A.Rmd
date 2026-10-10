@@ -83,7 +83,7 @@ dat$type <- as.factor(dat$type)
 contrasts(dat$type) <- contr.sum(2)
 ```
 
-# 2. Model 1: Delay x Severity, controlling for Crime Scenario
+# 2. Model 1: Delay x Severity, controlling for Crime Type
 
 Corresponds to the left ("Study 1A") column of Table S2 and the first
 paragraph of the Study 1A Results (main effect of Delay and Delay x Severity
@@ -91,7 +91,7 @@ interaction).
 
 ```{r model1-fit}
 lm1 <- lmer(
-  rating ~ harm_scaled * z_delay + situation +
+  rating ~ harm_scaled * z_delay + type +
     (1 + harm_scaled + z_delay | participant),
   data = dat,
   control = lmerControl(optimizer = "optimx",
@@ -100,6 +100,8 @@ lm1 <- lmer(
 isSingular(lm1)
 summary(lm1)
 confint(lm1, method = "Wald")   # 95% Wald CIs reported in the text / Table S2
+AIC(lm1)
+BIC(lm1)
 ```
 
 ```{r model1-simple-slopes}
